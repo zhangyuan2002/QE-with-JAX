@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Sep 26 15:41:57 2024
+
+@author: yuan
+"""
+
+import numba
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import quantecon as qe
+import jax
+import jax.numpy as jnp
+from time import time
+
+
+def create_wealth_model(w_hat=1.0,   # Savings parameter
+                        s_0=0.75,    # Savings parameter
+                        c_y=1.0,     # Labor income parameter
+                        μ_y=1.0,     # Labor income parameter
+                        σ_y=0.2,     # Labor income parameter
+                        c_r=0.05,    # Rate of return parameter
+                        μ_r=0.1,     # Rate of return parameter
+                        σ_r=0.5,     # Rate of return parameter
+                        a=0.5,       # Aggregate shock parameter
+                        b=0.0,       # Aggregate shock parameter
+                        σ_z=0.1):    # Aggregate shock parameter
+    """
+    Create a wealth model with given parameters. 
+
+    Return a tuple model = (household_params, aggregate_params), where
+    household_params collects household information and aggregate_params
+    collects information relevant to the aggregate shock process.
+    
+    """
+    # Mean and variance of z process
+    z_mean = b / (1 - a)
+    z_var = σ_z**2 / (1 - a**2)
+    exp_z_mean = np.exp(z_mean + z_var / 2)
+    # Mean of R and y processes
+    R_mean = c_r * exp_z_mean + np.exp(μ_r + σ_r**2 / 2)
+    y_mean = c_y * exp_z_mean + np.exp(μ_y + σ_y**2 / 2)
+    # Test stability condition ensuring wealth does not diverge
+    # to infinity.
+    α = R_mean * s_0
+    if α >= 1:
+        raise ValueError("Stability condition failed.")
+    # Pack values into tuples and return them
+    household_params = (w_hat, s_0, c_y, μ_y, σ_y, c_r, μ_r, σ_r, y_mean)
+    aggregate_params = (a, b, σ_z, z_mean, z_var)
+    model = household_params, aggregate_params
+    return model
+
+@numba.jit
+def generate_aggregate_state_sequence(aggregate_params, length=100):
+    a, b, σ_z, z_mean, z_var = aggregate_params 
+    z = np.empty(length+1)
+    z[0] = z_mean   # Initialize at z_mean
+    for t in range(length):
+        z[t+1] = a * z[t] + b + σ_z * np.random.randn()
+    return z
+
+
+@numba.jit
+def update_wealth(household_params, w, z):
+    """
+    Generate w_{t+1} given w_t and z_{t+1}.
+    """
+    # Unpack
+    w_hat, s_0, c_y, μ_y, σ_y, c_r, μ_r, σ_r, y_mean = household_params
+    # Update wealth
+    y = c_y * np.exp(z) + np.exp(μ_y + σ_y * np.random.randn())
+    wp = y
+    if w >= w_hat:
+        R = c_r * np.exp(z) + np.exp(μ_r + σ_r * np.random.randn())
+        wp += R * s_0 * w
+    return wp
+
+
+@numba.jit
+def wealth_time_series(model, w_0, sim_length):
+    """
+    Generate a single time series of length sim_length for wealth given initial
+    value w_0.  The function generates its own aggregate shock sequence.
+
+    """
+    # Unpack
+    household_params, aggregate_params = model
+    a, b, σ_z, z_mean, z_var = aggregate_params 
+    # Initialize and update
+    z = generate_aggregate_state_sequence(aggregate_params, 
+                                          length=sim_length)
+    w = np.empty(sim_length)
+    w[0] = w_0
+    for t in range(sim_length-1):
+        w[t+1] = update_wealth(household_params, w[t], z[t+1])
+    return w
+
+
+model = create_wealth_model()
+household_params, aggregate_params = model
+w_hat, s_0, c_y, μ_y, σ_y, c_r, μ_r, σ_r, y_mean = household_params
+a, b, σ_z, z_mean, z_var = aggregate_params 
+ts_length = 200
+w = wealth_time_series(model, y_mean, ts_length)
+
+fig, ax = plt.subplots()
+ax.plot(w)
+plt.show()
+
+@numba.jit(parallel=True)
+def update_cross_section(model, w_distribution, z_sequence):
+    """
+    Shifts a cross-section of households forward in time
+
+    Takes 
+
+        * a current distribution of wealth values as w_distribution and
+        * an aggregate shock sequence z_sequence
+
+    and updates each w_t in w_distribution to w_{t+j}, where
+    j = len(z_sequence).
+
+    Returns the new distribution.
+
+    """
+    # Unpack
+    household_params, aggregate_params = model
+
+    num_households = len(w_distribution)
+    new_distribution = np.empty_like(w_distribution)
+    z = z_sequence
+
+    # Update each household
+    for i in numba.prange(num_households):
+        w = w_distribution[i]
+        for t in range(sim_length):
+            w = update_wealth(household_params, w, z[t])
+        new_distribution[i] = w
+    return new_distribution
+
+
+fig, ax = plt.subplots()
+ax.plot(w)
+plt.show()
+
+
+@numba.jit(parallel=True)
+def update_cross_section(model, w_distribution, z_sequence):
+    """
+    Shifts a cross-section of households forward in time
+
+    Takes 
+
+        * a current distribution of wealth values as w_distribution and
+        * an aggregate shock sequence z_sequence
+
+    and updates each w_t in w_distribution to w_{t+j}, where
+    j = len(z_sequence).
+
+    Returns the new distribution.
+
+    """
+    # Unpack
+    household_params, aggregate_params = model
+
+    num_households = len(w_distribution)
+    new_distribution = np.empty_like(w_distribution)
+    z = z_sequence
+
+    # Update each household
+    for i in numba.prange(num_households):
+        w = w_distribution[i]
+        for t in range(sim_length):
+            w = update_wealth(household_params, w, z[t])
+        new_distribution[i] = w
+    return new_distribution
+
+
+sim_length = 200
+num_households = 10_000_000
+ψ_0 = np.full(num_households, y_mean)  # Initial distribution
+z_sequence = generate_aggregate_state_sequence(aggregate_params,
+                                               length=sim_length)
+print("Generating cross-section using Numba")
+start = time()
+ψ_star = update_cross_section(model, ψ_0, z_sequence)
+numba_with_compile = time() - start
+print(f"Generated cross-section in {numba_with_compile} seconds.\n")
+
+start = time()
+ψ_star = update_cross_section(model, ψ_0, z_sequence)
+numba_without_compile = time() - start
+print(f"Generated cross-section in {numba_without_compile} seconds.\n")
+
+
+
+############################################################
+def update_cross_section_jax(model, w_distribution, z_sequence, key):
+    """
+    Shifts a cross-section of households forward in time
+
+    Takes 
+
+        * a current distribution of wealth values as w_distribution and
+        * an aggregate shock sequence z_sequence
+
+    and updates each w_t in w_distribution to w_{t+j}, where
+    j = len(z_sequence).
+
+    Returns the new distribution.
+
+    """
+    # Unpack, simplify names
+    household_params, aggregate_params = model
+    w_hat, s_0, c_y, μ_y, σ_y, c_r, μ_r, σ_r, y_mean = household_params
+    w = w_distribution
+    n = len(w)
+
+    # Update wealth
+    for t, z in enumerate(z_sequence):
+        U = jax.random.normal(key, (2, n))
+        y = c_y * jnp.exp(z) + jnp.exp(μ_y + σ_y * U[0, :])
+        R = c_r * jnp.exp(z) + jnp.exp(μ_r + σ_r * U[1, :])
+        w = y + jnp.where(w < w_hat, 0.0, R * s_0 * w) 
+        key, subkey = jax.random.split(key)
+
+    return w
+
+sim_length = 200
+num_households = 10_000_000
+ψ_0 = jnp.full(num_households, y_mean)  # Initial distribution
+z_sequence = generate_aggregate_state_sequence(aggregate_params,
+                                               length=sim_length)
+z_sequence = jnp.array(z_sequence)
+
+
+print("Generating cross-section using JAX")
+key = jax.random.PRNGKey(1234)
+start = time()
+ψ_star = update_cross_section_jax(model, ψ_0, z_sequence, key).block_until_ready()
+jax_with_compile = time() - start
+print(f"Generated cross-section in {jax_with_compile} seconds.\n")
+
+print("Repeating without compile time.")
+key = jax.random.PRNGKey(1234)
+start = time()
+ψ_star = update_cross_section_jax(model, ψ_0, z_sequence, key).block_until_ready()
+jax_without_compile = time() - start
+print(f"Generated cross-section in {jax_without_compile} seconds")
+
+
+def update_cross_section_jax_compiled(model, 
+                                      w_distribution, 
+                                      w_size,
+                                      z_sequence, 
+                                      key):
+    """
+    Shifts a cross-section of households forward in time
+
+    Takes 
+
+        * a current distribution of wealth values as w_distribution and
+        * an aggregate shock sequence z_sequence
+
+    and updates each w_t in w_distribution to w_{t+j}, where
+    j = len(z_sequence).
+
+    Returns the new distribution.
+
+    """
+    # Unpack, simplify names
+    household_params, aggregate_params = model
+    w_hat, s_0, c_y, μ_y, σ_y, c_r, μ_r, σ_r, y_mean = household_params
+    w = w_distribution
+    n = len(w)
+    z = z_sequence
+    sim_length = len(z)
+
+    def body_function(t, state):
+        key, w = state
+        key, subkey = jax.random.split(key)
+        U = jax.random.normal(subkey, (2, n))
+        y = c_y * jnp.exp(z[t]) + jnp.exp(μ_y + σ_y * U[0, :])
+        R = c_r * jnp.exp(z[t]) + jnp.exp(μ_r + σ_r * U[1, :])
+        w = y + jnp.where(w < w_hat, 0.0, R * s_0 * w) 
+        return key, w
+
+    key, w = jax.lax.fori_loop(0, sim_length, body_function, (key, w))
+    return w
+
+
+update_cross_section_jax_compiled = jax.jit(
+        update_cross_section_jax_compiled, static_argnums=(2,)
+)
+
+
+print("Generating cross-section using JAX with compiled loop")
+key = jax.random.PRNGKey(1234)
+start = time()
+ψ_star = update_cross_section_jax_compiled(
+        model, ψ_0, num_households, z_sequence, key
+).block_until_ready()
+jax_fori_with_compile = time() - start
+print(f"Generated cross-section in {jax_fori_with_compile} seconds.\n")
+
+
+print("Repeating without compile time")
+key = jax.random.PRNGKey(1234)
+start = time()
+ψ_star = update_cross_section_jax_compiled(
+        model, ψ_0, num_households, z_sequence, key
+).block_until_ready()
+jax_fori_without_compile = time() - start
+print(f"Generated cross-section in {jax_fori_without_compile} seconds")
+
+
+print(f"JAX is {numba_without_compile/jax_fori_without_compile:.4f} times faster.\n")
+
+
+model = create_wealth_model()
+key = jax.random.PRNGKey(1234)
+ψ_star = update_cross_section_jax_compiled(
+        model, ψ_0, num_households, z_sequence, key
+)
+fig, ax = plt.subplots()
+
+rank_data, size_data = qe.rank_size(ψ_star, c=0.001)
+ax.loglog(rank_data, size_data, 'o', markersize=3.0, alpha=0.5)
+ax.set_xlabel("log rank")
+ax.set_ylabel("log size")
+
+plt.show()
+
+
+def _lorenz_curve_jax(w, w_size):
+    n = w.shape[0]
+    w = jnp.sort(w)
+    x = jnp.arange(n + 1) / n
+    s = jnp.concatenate((jnp.zeros(1), jnp.cumsum(w)))
+    y = s / s[n]
+    return x, y
+
+lorenz_curve_jax = jax.jit(_lorenz_curve_jax, static_argnums=(1,))
+
+
+sim_length = 200
+num_households = 1_000_000
+ψ_0 = jnp.full(num_households, y_mean)  # Initial distribution
+z_sequence = generate_aggregate_state_sequence(aggregate_params,
+                                               length=sim_length)
+z_sequence = jnp.array(z_sequence)
+
+
+key = jax.random.PRNGKey(1234)
+ψ_star = update_cross_section_jax_compiled(
+        model, ψ_0, num_households, z_sequence, key
+)
+
+
+%time _ = lorenz_curve_jax(ψ_star, num_households)
+
+# Now time it without compile time
+%time x, y = lorenz_curve_jax(ψ_star, num_households)
+
+fig, ax = plt.subplots()
+ax.plot(x, y, label="Lorenz curve at defaults")
+ax.plot(x, x, 'k-', lw=1)
+ax.legend()
+plt.show()
+
+
+
+def _gini_jax(w, w_size):
+    w_1 = jnp.reshape(w, (w_size, 1))
+    w_2 = jnp.reshape(w, (1, w_size))
+    g_sum = jnp.sum(jnp.abs(w_1 - w_2))
+    return g_sum / (2 * w_size * jnp.sum(w))
+
+gini_jax = jax.jit(_gini_jax, static_argnums=(1,))
+
+%time gini = gini_jax(ψ_star, num_households).block_until_ready()
+
+# Now time it without compilation
+%time gini = gini_jax(ψ_star, num_households).block_until_ready()
+
+gini
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
