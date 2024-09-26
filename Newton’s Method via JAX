@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Sep 26 16:16:56 2024
+
+@author: yuan
+"""
+
+import jax
+import jax.numpy as jnp
+from scipy.optimize import root
+import matplotlib.pyplot as plt
+
+
+def newton(f, x_0, tol=1e-5):
+    f_prime = jax.grad(f)
+    def q(x):
+        return x - f(x) / f_prime(x)
+
+    error = tol + 1
+    x = x_0
+    while error > tol:
+        y = q(x)
+        error = abs(x - y)
+        x = y
+        
+    return x
+
+
+f = lambda x: jnp.sin(4 * (x - 1/4)) + x + x**20 - 1
+x = jnp.linspace(0, 1, 100)
+
+fig, ax = plt.subplots()
+ax.plot(x, f(x), label='$f(x)$')
+ax.axhline(ls='--', c='k')
+ax.set_xlabel('$x$', fontsize=12)
+ax.set_ylabel('$f(x)$', fontsize=12)
+ax.legend(fontsize=12)
+plt.show()
+
+
+newton(f, 0.2)
+
+
+def e(p, A, b, c):
+    return jnp.exp(- A @ p) + c - b * jnp.sqrt(p)
+
+
+def newton(f, x_0, tol=1e-5, max_iter=15):
+    """
+    A multivariate Newton root-finding routine.
+
+    """
+    x = x_0
+    f_jac = jax.jacobian(f)
+    @jax.jit
+    def q(x):
+        " Updates the current guess. "
+        return x - jnp.linalg.solve(f_jac(x), f(x))
+    error = tol + 1
+    n = 0
+    while error > tol:
+        n += 1
+        if(n > max_iter):
+            raise Exception('Max iteration reached without convergence')
+        y = q(x)
+        error = jnp.linalg.norm(x - y)
+        x = y
+        print(f'iteration {n}, error = {error}')
+    return x
+
+
+dim = 5_000
+seed = 32
+
+# Create a random matrix A and normalize the rows to sum to one
+key = jax.random.PRNGKey(seed)
+A = jax.random.uniform(key, [dim, dim])
+s = jnp.sum(A, axis=0)
+A = A / s
+
+# Set up b and c
+b = jnp.ones(dim)
+c = jnp.ones(dim)
+
+
+init_p = jnp.ones(dim)
+
+%%time
+p = newton(lambda p: e(p, A, b, c), init_p).block_until_ready()
+
+%%time
+p = newton(lambda p: e(p, A, b, c), init_p).block_until_ready()
+
+jnp.max(jnp.abs(e(p, A, b, c)))
+
+%%time
+solution = root(lambda p: e(p, A, b, c),
+                init_p,
+                jac=lambda p: jax.jacobian(e)(p, A, b, c),
+                method='hybr',
+                tol=1e-5)
+
+p = solution.x
+jnp.max(jnp.abs(e(p, A, b, c)))
+
+
+
