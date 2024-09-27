@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Sep 27 18:56:06 2024
+
+@author: yuan
+"""
+
+import matplotlib.pyplot as plt
+import quantecon as qe
+import jax
+import jax.numpy as jnp
+from collections import namedtuple
+
+jax.config.update("jax_enable_x64", True)
+
+
+Model = namedtuple('Model', ('n', 'w_vals', 'P', 'β', 'c'))
+
+def create_js_model(
+        n=500,       # wage grid size
+        ρ=0.9,       # wage persistence
+        ν=0.2,       # wage volatility
+        β=0.99,      # discount factor
+        c=1.0,       # unemployment compensation
+    ):
+    "Creates an instance of the job search model with Markov wages."
+    mc = qe.tauchen(n, ρ, ν)
+    w_vals, P = jnp.exp(mc.state_values), jnp.array(mc.P)
+    return Model(n, w_vals, P, β, c)
+
+model = create_js_model(β=0.98)
+
+model.c
+
+model.β
+
+model.w_vals.mean()  
+
+@jax.jit
+def T(v, model):
+    """
+    The Bellman operator Tv = max{e, c + β E v} with 
+
+        e(w) = w / (1-β) and (Ev)(w) = E_w[ v(W')]
+
+    """
+    n, w_vals, P, β, c = model
+    h = c + β * P @ v
+    e = w_vals / (1 - β)
+
+    return jnp.maximum(e, h)
+
+@jax.jit
+def get_greedy(v, model):
+    "Get a v-greedy policy."
+    n, w_vals, P, β, c = model
+    e = w_vals / (1 - β)
+    h = c + β * P @ v
+    σ = jnp.where(e >= h, 1, 0)
+    return σ
+
+def vfi(model, max_iter=10_000, tol=1e-4):
+    "Solve the infinite-horizon Markov job search model by VFI."
+    print("Starting VFI iteration.")
+    v = jnp.zeros_like(model.w_vals)    # Initial guess
+    i = 0
+    error = tol + 1
+
+    while error > tol and i < max_iter:
+        new_v = T(v, model)
+        error = jnp.max(jnp.abs(new_v - v))
+        i += 1
+        v = new_v
+
+    v_star = v
+    σ_star = get_greedy(v_star, model)
+    return v_star, σ_star
+
+model = create_js_model()
+n, w_vals, P, β, c = model
+
+v_star, σ_star = vfi(model)
+
+fig, ax = plt.subplots()
+ax.plot(σ_star)
+ax.set_xlabel("wage values")
+ax.set_ylabel("optimal choice (stop=1)")
+plt.show()
+
+stop_indices = jnp.where(σ_star == 1)
+stop_indices
+
+res_wage_index = min(stop_indices[0])
+res_wage = w_vals[res_wage_index]
+
+fig, ax = plt.subplots()
+ax.plot(w_vals, v_star, alpha=0.8, label="value function")
+ax.vlines((res_wage,), 150, 400, 'k', ls='--', label="reservation wage")
+ax.legend(frameon=False, fontsize=12, loc="lower right")
+ax.set_xlabel("$w$", fontsize=12)
+plt.show()
+
